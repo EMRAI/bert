@@ -33,6 +33,8 @@ flags = tf.flags
 
 FLAGS = flags.FLAGS
 
+membership_not_startend = True
+
 ## Required parameters
 flags.DEFINE_string(
     "bert_config_file", None,
@@ -209,7 +211,8 @@ class InputFeatures(object):
                segment_ids,
                start_position=None,
                end_position=None,
-               is_impossible=None):
+               is_impossible=None,
+               membership=None):
     self.unique_id = unique_id
     self.example_index = example_index
     self.doc_span_index = doc_span_index
@@ -222,6 +225,7 @@ class InputFeatures(object):
     self.start_position = start_position
     self.end_position = end_position
     self.is_impossible = is_impossible
+    self.membership = membership
 
 
 def read_squad_examples(input_file, is_training):
@@ -453,6 +457,11 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
           tf.logging.info(
               "answer: %s" % (tokenization.printable_text(answer_text)))
 
+      if start_position is None or end_position is None:
+        membership = None
+      else:
+        membership = [1 if start_position <= i <= end_position else 0 for i, _ in enumerate(input_mask)]
+
       feature = InputFeatures(
           unique_id=unique_id,
           example_index=example_index,
@@ -465,7 +474,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
           segment_ids=segment_ids,
           start_position=start_position,
           end_position=end_position,
-          is_impossible=example.is_impossible)
+          is_impossible=example.is_impossible,
+          membership=membership)
 
       # Run callback
       output_fn(feature)
@@ -565,26 +575,46 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
   seq_length = final_hidden_shape[1]
   hidden_size = final_hidden_shape[2]
 
-  output_weights = tf.get_variable(
-      "cls/squad/output_weights", [2, hidden_size],
-      initializer=tf.truncated_normal_initializer(stddev=0.02))
+  if membership_not_startend:
+    output_weights = tf.get_variable(
+          "cls/squad/output_weights", [1, hidden_size],
+          initializer=tf.truncated_normal_initializer(stddev=0.02))
 
-  output_bias = tf.get_variable(
-      "cls/squad/output_bias", [2], initializer=tf.zeros_initializer())
+    output_bias = tf.get_variable(
+        "cls/squad/output_bias", [1], initializer=tf.zeros_initializer())
 
-  final_hidden_matrix = tf.reshape(final_hidden,
-                                   [batch_size * seq_length, hidden_size])
-  logits = tf.matmul(final_hidden_matrix, output_weights, transpose_b=True)
-  logits = tf.nn.bias_add(logits, output_bias)
+    final_hidden_matrix = tf.reshape(final_hidden,
+                                     [batch_size * seq_length, hidden_size])
+    membership_logits = tf.matmul(final_hidden_matrix, output_weights, transpose_b=True)
+    membership_logits = tf.nn.bias_add(membership_logits, output_bias)
 
-  logits = tf.reshape(logits, [batch_size, seq_length, 2])
-  logits = tf.transpose(logits, [2, 0, 1])
+    membership_logits = tf.reshape(membership_logits, [batch_size, seq_length, 1])
+    membership_logits = tf.transpose(membership_logits, [2, 0, 1])
+    membership_logits = tf.squeeze(membership_logits)       # get rid of the 1 dimension
 
-  unstacked_logits = tf.unstack(logits, axis=0)
+    return membership_logits
 
-  (start_logits, end_logits) = (unstacked_logits[0], unstacked_logits[1])
+  else:
+    output_weights = tf.get_variable(
+        "cls/squad/output_weights", [2, hidden_size],
+        initializer=tf.truncated_normal_initializer(stddev=0.02))
 
-  return (start_logits, end_logits)
+    output_bias = tf.get_variable(
+        "cls/squad/output_bias", [2], initializer=tf.zeros_initializer())
+
+    final_hidden_matrix = tf.reshape(final_hidden,
+                                     [batch_size * seq_length, hidden_size])
+    logits = tf.matmul(final_hidden_matrix, output_weights, transpose_b=True)
+    logits = tf.nn.bias_add(logits, output_bias)
+
+    logits = tf.reshape(logits, [batch_size, seq_length, 2])
+    logits = tf.transpose(logits, [2, 0, 1])
+
+    unstacked_logits = tf.unstack(logits, axis=0)
+
+    (start_logits, end_logits) = (unstacked_logits[0], unstacked_logits[1])
+
+    return (start_logits, end_logits)
 
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
@@ -606,13 +636,22 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
 
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
 
-    (start_logits, end_logits) = create_model(
-        bert_config=bert_config,
-        is_training=is_training,
-        input_ids=input_ids,
-        input_mask=input_mask,
-        segment_ids=segment_ids,
-        use_one_hot_embeddings=use_one_hot_embeddings)
+    if membership_not_startend:
+      membership_logits = create_model(
+          bert_config=bert_config,
+          is_training=is_training,
+          input_ids=input_ids,
+          input_mask=input_mask,
+          segment_ids=segment_ids,
+          use_one_hot_embeddings=use_one_hot_embeddings)
+    else:
+      (start_logits, end_logits) = create_model(
+          bert_config=bert_config,
+          is_training=is_training,
+          input_ids=input_ids,
+          input_mask=input_mask,
+          segment_ids=segment_ids,
+          use_one_hot_embeddings=use_one_hot_embeddings)
 
     tvars = tf.trainable_variables()
 
@@ -643,21 +682,26 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     if mode == tf.estimator.ModeKeys.TRAIN:
       seq_length = modeling.get_shape_list(input_ids)[1]
 
-      def compute_loss(logits, positions):
-        one_hot_positions = tf.one_hot(
-            positions, depth=seq_length, dtype=tf.float32)
-        log_probs = tf.nn.log_softmax(logits, axis=-1)
-        loss = -tf.reduce_mean(
-            tf.reduce_sum(one_hot_positions * log_probs, axis=-1))
-        return loss
+      if membership_not_startend:
+        true_membership = tf.cast(features["membership"], dtype=tf.float32)
+        total_loss = tf.reduce_mean(
+            tf.nn.sigmoid_cross_entropy_with_logits(labels=true_membership, logits=membership_logits))
+      else:
+        def compute_loss(logits, positions):
+          one_hot_positions = tf.one_hot(
+              positions, depth=seq_length, dtype=tf.float32)
+          log_probs = tf.nn.log_softmax(logits, axis=-1)
+          loss = -tf.reduce_mean(
+              tf.reduce_sum(one_hot_positions * log_probs, axis=-1))
+          return loss
 
-      start_positions = features["start_positions"]
-      end_positions = features["end_positions"]
+        start_positions = features["start_positions"]
+        end_positions = features["end_positions"]
 
-      start_loss = compute_loss(start_logits, start_positions)
-      end_loss = compute_loss(end_logits, end_positions)
+        start_loss = compute_loss(start_logits, start_positions)
+        end_loss = compute_loss(end_logits, end_positions)
 
-      total_loss = (start_loss + end_loss) / 2.0
+        total_loss = (start_loss + end_loss) / 2.0
 
       train_op = optimization.create_optimizer(
           total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
@@ -668,11 +712,17 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
           train_op=train_op,
           scaffold_fn=scaffold_fn)
     elif mode == tf.estimator.ModeKeys.PREDICT:
-      predictions = {
-          "unique_ids": unique_ids,
-          "start_logits": start_logits,
-          "end_logits": end_logits,
-      }
+      if membership_not_startend:
+        predictions = {
+            "unique_ids": unique_ids,
+            "membership": membership_logits,
+        }
+      else:
+        predictions = {
+            "unique_ids": unique_ids,
+            "start_logits": start_logits,
+            "end_logits": end_logits,
+        }
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
           mode=mode, predictions=predictions, scaffold_fn=scaffold_fn)
     else:
@@ -695,6 +745,7 @@ def input_fn_builder(input_file, seq_length, is_training, drop_remainder):
   }
 
   if is_training:
+    name_to_features["membership"] = tf.FixedLenFeature([seq_length], tf.int64)
     name_to_features["start_positions"] = tf.FixedLenFeature([], tf.int64)
     name_to_features["end_positions"] = tf.FixedLenFeature([], tf.int64)
 
@@ -735,7 +786,7 @@ def input_fn_builder(input_file, seq_length, is_training, drop_remainder):
 
 
 RawResult = collections.namedtuple("RawResult",
-                                   ["unique_id", "start_logits", "end_logits"])
+                                   ["unique_id", "start_logits", "end_logits", "membership"])
 
 
 def write_predictions(all_examples, all_features, all_results, n_best_size,
@@ -772,16 +823,26 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
     null_end_logit = 0  # the end logit at the slice with min null score
     for (feature_index, feature) in enumerate(features):
       result = unique_id_to_result[feature.unique_id]
-      start_indexes = _get_best_indexes(result.start_logits, n_best_size)
-      end_indexes = _get_best_indexes(result.end_logits, n_best_size)
+      if membership_not_startend:
+        membership = result.membership
+        # TODO: smoothing heuristic (not just min/max)
+        indices = [i for i, m in enumerate(membership) if m > 0]
+        start_indexes = [min(indices)] if len(indices) else [0]
+        end_indexes = [max(indices)] if len(indices) else [0]
+      else:
+        start_indexes = _get_best_indexes(result.start_logits, n_best_size)
+        end_indexes = _get_best_indexes(result.end_logits, n_best_size)
       # if we could have irrelevant answers, get the min score of irrelevant
       if FLAGS.version_2_with_negative:
-        feature_null_score = result.start_logits[0] + result.end_logits[0]
-        if feature_null_score < score_null:
-          score_null = feature_null_score
-          min_null_feature_index = feature_index
-          null_start_logit = result.start_logits[0]
-          null_end_logit = result.end_logits[0]
+        if membership_not_startend:
+          score_null = 0
+        else:
+          feature_null_score = result.start_logits[0] + result.end_logits[0]
+          if feature_null_score < score_null:
+            score_null = feature_null_score
+            min_null_feature_index = feature_index
+            null_start_logit = result.start_logits[0]
+            null_end_logit = result.end_logits[0]
       for start_index in start_indexes:
         for end_index in end_indexes:
           # We could hypothetically create invalid predictions, e.g., predict
@@ -802,13 +863,15 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
           length = end_index - start_index + 1
           if length > max_answer_length:
             continue
+          start_logit = 1 if membership_not_startend else result.start_logits[start_index]
+          end_logit = 1 if membership_not_startend else result.end_logits[end_index]
           prelim_predictions.append(
               _PrelimPrediction(
                   feature_index=feature_index,
                   start_index=start_index,
                   end_index=end_index,
-                  start_logit=result.start_logits[start_index],
-                  end_logit=result.end_logits[end_index]))
+                  start_logit=start_logit,
+                  end_logit=end_logit))
 
     if FLAGS.version_2_with_negative:
       prelim_predictions.append(
@@ -883,7 +946,7 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
     for entry in nbest:
       total_scores.append(entry.start_logit + entry.end_logit)
       if not best_non_null_entry:
-        if entry.text:
+        if entry.text or membership_not_startend:    # TODO: restore?
           best_non_null_entry = entry
 
     probs = _compute_softmax(total_scores)
@@ -1080,6 +1143,7 @@ class FeatureWriter(object):
     features["segment_ids"] = create_int_feature(feature.segment_ids)
 
     if self.is_training:
+      features["membership"] = create_int_feature(feature.membership)
       features["start_positions"] = create_int_feature([feature.start_position])
       features["end_positions"] = create_int_feature([feature.end_position])
       impossible = 0
@@ -1255,16 +1319,26 @@ def main(_):
     all_results = []
     for result in estimator.predict(
         predict_input_fn, yield_single_examples=True):
-      if len(all_results) % 1000 == 0:
+      if len(all_results) % 1000 == 0 or True: # TODO: revert
         tf.logging.info("Processing example: %d" % (len(all_results)))
       unique_id = int(result["unique_ids"])
-      start_logits = [float(x) for x in result["start_logits"].flat]
-      end_logits = [float(x) for x in result["end_logits"].flat]
-      all_results.append(
-          RawResult(
-              unique_id=unique_id,
-              start_logits=start_logits,
-              end_logits=end_logits))
+      if membership_not_startend:
+        membership = [float(x) for x in result["membership"]]
+        all_results.append(
+            RawResult(
+                unique_id=unique_id,
+                start_logits=None,
+                end_logits=None,
+                membership=membership))
+      else:
+        start_logits = [float(x) for x in result["start_logits"].flat]
+        end_logits = [float(x) for x in result["end_logits"].flat]
+        all_results.append(
+            RawResult(
+                unique_id=unique_id,
+                membership=None,
+                start_logits=start_logits,
+                end_logits=end_logits))
 
     output_prediction_file = os.path.join(FLAGS.output_dir, "predictions.json")
     output_nbest_file = os.path.join(FLAGS.output_dir, "nbest_predictions.json")

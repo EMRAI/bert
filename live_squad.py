@@ -5,6 +5,8 @@ import run_squad
 import tokenization
 import modeling
 
+from collections import namedtuple
+
 from live_estimator import LiveEstimator
 
 
@@ -12,6 +14,9 @@ from live_estimator import LiveEstimator
 A LiveEstimator for SQuAD data (or similarly formatted).
 Draws heavily from code in run_squad.py (and uses functions directly to that module where possible).
 """
+
+
+RawResult = namedtuple('RawResult', ['unique_id', 'membership'])
 
 
 class LiveSquad(LiveEstimator):
@@ -129,12 +134,14 @@ class LiveSquad(LiveEstimator):
 
     def my_result_to_output(self, feature, result):
         unique_id = int(result["unique_ids"])
-        start_logits = [float(x) for x in result["start_logits"].flat]
-        end_logits = [float(x) for x in result["end_logits"].flat]
-        raw_result = run_squad.RawResult(
+        membership = [float(x) for x in result["membership"]]
+        # start_logits = [float(x) for x in result["start_logits"].flat]
+        # end_logits = [float(x) for x in result["end_logits"].flat]
+        raw_result = RawResult(
                     unique_id=unique_id,
-                    start_logits=start_logits,
-                    end_logits=end_logits)
+                    # start_logits=start_logits,
+                    # end_logits=end_logits,
+                    membership=membership)
         return get_predictions(feature, raw_result, self.flags.n_best_size, self.flags.max_answer_length)
 
     def my_data_types(self):
@@ -151,6 +158,20 @@ class LiveSquad(LiveEstimator):
 
     def set_feature_id(self, feature, unique_id):
         feature['unique_ids'] = unique_id
+
+
+def get_nbest_bounds_from_membership(membership_logits, n_best_size=1):
+    """
+    Return possible inclusive start, exclusive end indices given a list of membership logits.
+    :param membership_logits:
+    :return: two lists, each of length n (in nbest)
+    """
+    # TODO: include heuristic for choosing bounds (not just min/max)
+    # TODO: implement nbest in heuristic too
+    indices = [i for i, m in enumerate(membership_logits) if m > 0]
+    start_index = min(indices) if len(indices) else 0
+    end_index = max(indices) if len(indices) else 0
+    return [start_index], [end_index]
 
 
 def get_predictions(example, result, n_best_size, max_answer_length):
@@ -175,15 +196,9 @@ def get_predictions(example, result, n_best_size, max_answer_length):
     null_start_logit = 0  # the start logit at the slice with min null score
     null_end_logit = 0  # the end logit at the slice with min null score
 
-    start_indexes = run_squad._get_best_indexes(result.start_logits, n_best_size)
-    end_indexes = run_squad._get_best_indexes(result.end_logits, n_best_size)
-    # get the min score of irrelevant
-    # feature_null_score = result.start_logits[0] + result.end_logits[0]
-    # if feature_null_score < score_null:
-    #     score_null = feature_null_score
-    #     min_null_feature_index = feature_index
-    #     null_start_logit = result.start_logits[0]
-    #     null_end_logit = result.end_logits[0]
+    # start_indexes = run_squad._get_best_indexes(result.start_logits, n_best_size)
+    # end_indexes = run_squad._get_best_indexes(result.end_logits, n_best_size)
+    start_indexes, end_indexes = get_nbest_bounds_from_membership(result.membership, n_best_size)
     for start_index in start_indexes:
         for end_index in end_indexes:
             # We could hypothetically create invalid predictions, e.g., predict
@@ -210,17 +225,10 @@ def get_predictions(example, result, n_best_size, max_answer_length):
                     feature_index=0,
                     start_index=start_index,
                     end_index=end_index,
-                    start_logit=result.start_logits[start_index],
-                    end_logit=result.end_logits[end_index]))
-
-    # prelim_predictions.append(
-    #     _PrelimPrediction(
-    #         feature_index=min_null_feature_index,
-    #         start_index=0,
-    #         end_index=0,
-    #         start_logit=null_start_logit,
-    #         end_logit=null_end_logit))
-    # TODO: handle "null" output
+                    start_logit=1,
+                    end_logit=1))
+                    # start_logit=result.start_logits[start_index],
+                    # end_logit=result.end_logits[end_index]))
 
     prelim_predictions = sorted(
         prelim_predictions,

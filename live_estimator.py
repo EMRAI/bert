@@ -108,7 +108,6 @@ class LiveEstimator:
     def inputs_generator(self):
         while True:
             job = self.jobs_queue.get()
-            print(job)
             yield job
 
     def create_input_fn(self):
@@ -121,8 +120,8 @@ class LiveEstimator:
         return input_fn
 
     def _prediction_loop(self):
-        for result in self.estimator.predict(self.create_input_fn(), yield_single_examples=True):
-            unique_id = self.get_result_id(result)
+        for result in self.estimator.predict(self.create_input_fn(), yield_single_examples=False):
+            unique_id = self.get_result_id(result)[0]   # single batch, hence [0]
             feature = self.example_dict[unique_id]
             output = self.my_result_to_output(feature, result)
             self.final_results_dict[unique_id] = output
