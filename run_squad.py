@@ -456,8 +456,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
           tf.logging.info("end_position: %d" % (end_position))
           tf.logging.info(
               "answer: %s" % (tokenization.printable_text(answer_text)))
-
-      # TODO: confirm that end is inclusive during prediction
+              
       membership = [1 if start_position <= i <= end_position else 0 for i, _ in enumerate(input_mask)]
 
       feature = InputFeatures(
@@ -681,7 +680,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
       seq_length = modeling.get_shape_list(input_ids)[1]
 
       if membership_not_startend:
-        true_membership = tf.dtypes.cast(features["membership"], dtype=tf.float32)
+        true_membership = tf.cast(features["membership"], dtype=tf.float32)
         # TODO: is this loss appropriate? Should it be negative?
         total_loss = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(labels=true_membership, logits=membership_logits))
@@ -825,8 +824,7 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
       if membership_not_startend:
         membership = result.membership
         # TODO: smoothing heuristic (not just min/max)
-        thresh = .5
-        indices = [i for i, m in enumerate(membership) if m >= thresh]
+        indices = [i for i, m in enumerate(membership) if m > 0]
         start_indexes = [min(indices)] if len(indices) else [0]
         end_indexes = [max(indices)] if len(indices) else [0]
       else:

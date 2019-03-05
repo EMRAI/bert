@@ -108,6 +108,7 @@ class LiveEstimator:
     def inputs_generator(self):
         while True:
             job = self.jobs_queue.get()
+            print('JOB', job)
             yield job
 
     def create_input_fn(self):
