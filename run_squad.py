@@ -456,8 +456,11 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
           tf.logging.info("end_position: %d" % (end_position))
           tf.logging.info(
               "answer: %s" % (tokenization.printable_text(answer_text)))
-              
-      membership = [1 if start_position <= i <= end_position else 0 for i, _ in enumerate(input_mask)]
+
+      if start_position is None or end_position is None:
+        membership = None
+      else:
+        membership = [1 if start_position <= i <= end_position else 0 for i, _ in enumerate(input_mask)]
 
       feature = InputFeatures(
           unique_id=unique_id,

@@ -10,7 +10,7 @@ python run_squad.py \
   --train_file=$SQUAD_DIR/shorttrain.json \
   --do_predict=True \
   --predict_file=$SQUAD_DIR/shortdev.json \
-  --train_batch_size=24 \
+  --train_batch_size=10 \
   --learning_rate=3e-5 \
   --num_train_epochs=1.0 \
   --max_seq_length=384 \
