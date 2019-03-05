@@ -684,7 +684,6 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
 
       if membership_not_startend:
         true_membership = tf.cast(features["membership"], dtype=tf.float32)
-        # TODO: is this loss appropriate? Should it be negative?
         total_loss = tf.reduce_mean(
             tf.nn.sigmoid_cross_entropy_with_logits(labels=true_membership, logits=membership_logits))
       else:
