@@ -1,3 +1,10 @@
+## GREG'S EMR.AI MODIFICATIONS
+
+This repository has been modified in two key ways:
+
+1. The prediction layer and loss function have been modified for SQuAD such that the model now predicts *membership* of tokens within the answer rather than the start and end indices of the range. I hypothesized this would be better for long contexts and frequent null answers (it is similar to what we did previously with BiDAF). Never really got good results though.
+2. Serving scripts have been added.
+
 # BERT
 
 **\*\*\*\*\* New February 7th, 2019: TfHub Module \*\*\*\*\***
